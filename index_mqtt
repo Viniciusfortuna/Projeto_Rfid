@@ -1,0 +1,170 @@
+/*******************************************************************************
+* IoT DevKit - Envio de Mensagens pelo ESP32 (Wi-Fi / MQTT) (v1.0)
+* 
+* Codigo usado para enviar as leituras do DHT11 do IoT DevKit atraves de WiFi e 
+* conexao com servidor MQTT. As leituras do sensor sao convertidas para 
+* mensagens JSON, e entao publicadas na PROIoT.
+* 
+* Copyright 2020 RoboCore.
+* Escrito por Giovanni de Castro (02/09/2020).
+* 
+* This program is free software: you can redistribute it and/or modify
+* it under the terms of the GNU Lesser General Public License as published by
+* the Free Software Foundation, either version 3 of the License, or
+* (at your option) any later version (<https://www.gnu.org/licenses/>).
+*******************************************************************************/
+
+//Verifica se o modelo de placa selecionado esta correto
+#if !defined(ARDUINO_ESP32_DEV) // ESP32
+#error Use this example with the ESP32
+#endif
+
+//Inclusao das Bibliotecas
+#include <WiFi.h>
+#include <PubSubClient.h>
+#include <DHT.h>
+#include <ArduinoJson.h>
+
+//Declaracao das variaveis da rede Wi-Fi
+const char* REDE = "SUA-REDE-WIFI-AQUI";
+const char* SENHA = "SENHA-SUA-REDE-AQUI";
+
+//Criacao dos objetos que serao resposaveis pela conexao ao servidor
+WiFiClient cliente; //Objeto "cliente" para a biblioteca WiFi
+PubSubClient MQTT(cliente); //Objeto "MQTT" para a biblioteca PubSubClient através do objeto "cliente"
+
+//Declaracao do servidor e da sua porta
+const char* SERVIDOR = "mqtt.proiot.network";
+const uint16_t PORTA = 1883;
+
+//Declaracao das variaveis geradas na plataforma
+const char* ID_DISPOSITIVO = "ID-DISPOSITIVO-AQUI"; //ID Unico do Dispositivo
+const char* TOKEN_API = "SEU-TOKEN-API-AQUI"; //Token da Organizacao
+//Altere as variaveis acima de acordo com os valores gerados na plataforma
+
+//Declaracao da variavel que armazena a senha de conexao ao servidor
+const char* SENHA_ID = ""; //Nao e necessario altera-la
+
+//Declaracao das variaveis que armazenam os Aliases das variaveis da plataforma
+const char ALIAS1[] = "Temperatura";
+const char ALIAS2[] = "Umidade";
+//Altere as variaveis acima de acordo com o que foi configurado na plataforma
+
+//Declaracao da variavel auxiliar para a criacao do topico para publish
+char TOPICO[50] = "device/";
+
+//Declaracao do pino conectado ao sensor DHT no DevKit
+const int PINO_DHT = 12;
+
+//Criacao do objeto DHT de acordo com o pino que ele esta conectado, e o seu modelo
+DHT dht(PINO_DHT, DHT11); //Modelo de fabrica do DevKit - DHT11
+
+//Declaracao das variaveis que armazenam as leituras do sensor
+float temperatura;
+float umidade;
+
+//Declaracao da variavel que armazena o intervalo de tempo entre mensagens
+unsigned long espera; //Variavel para o envio de mensagens
+unsigned long reconecta; //Variavel para a conexao com o servidor
+const long INTERVALO = 1200000; //20 minutos
+
+//---------------------------------------------------------------------------------------
+void setup (){
+
+  //Inicializacao do monitor serial
+  Serial.begin(115200);
+  Serial.println("Envio de dados para a PROIoT usando MQTT");
+
+  //Inicializacao do sensor DHT
+  dht.begin();
+
+  //Requisita a conexao do dispositivo a rede
+  Serial.print("Conectando a rede: ");
+  Serial.println(REDE);
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(REDE,SENHA);
+
+  //Aguarda ate que o dispositivo se conecte a rede
+  while(WiFi.status() != WL_CONNECTED){
+    delay(100);
+    Serial.print(".");
+  }
+
+  //Quando conectado, exibe o endereco IP
+  Serial.println("Conectado!");
+  Serial.print("Endereco IP: ");
+  Serial.println(WiFi.localIP());
+
+  //Indica para o objeto "MQTT" em que servidor e em que porta iremos nos conectar
+  Serial.print("Servidor configurado: ");
+  Serial.print(SERVIDOR);
+  Serial.print(" : ");
+  Serial.println(PORTA);
+  MQTT.setServer(SERVIDOR,PORTA);
+
+  //Concatena a variavel "TOPICO" com a variavel "ID_DISPOSITIVO"
+  strcat(TOPICO,ID_DISPOSITIVO);
+  
+}
+
+//---------------------------------------------------------------------------------------
+void loop (){
+
+  //Mantem a conexao ativa com o servidor
+  MQTT.loop();
+
+  //Verifica a conexao com o servidor
+  if(!MQTT.connected()){ //Se nao estiver conectado
+    if(reconecta < millis()){ //Executa a solicitacao de conexao a cada 5 segundos
+      Serial.println("");
+      Serial.println("Conectando ao servidor...");
+      //Solicita a conexao com o servidor utilizando os parametros "ID_DISPOSITIVO", "TOKEN_API" e "SENHA_ID" 
+      if(!MQTT.connect(ID_DISPOSITIVO, TOKEN_API, SENHA_ID)){ 
+        Serial.println("Falha na conexao com o servidor.");
+      } else {
+        Serial.println("Conectado!");
+        Serial.print("Enviando publicacoes para ");
+        Serial.println(TOPICO);  
+      }
+      reconecta = millis() + 5000; //Atualiza a contagem de tempo
+    }
+  } else { //Se estiver conectado
+    //Executa o envio de mensagens de acordo com a variavel "intervalo"
+    if(espera < millis()){ //Padrao 20 minutos
+      
+      //Realiza a leitura de temperatura e umidade do sensor
+      temperatura = dht.readTemperature();
+      umidade = dht.readHumidity();
+  
+      //Verifica se a leitura foi feita corretamente
+      if (isnan(umidade) || isnan(temperatura)) {
+        Serial.println("Falha na leitura do Sensor DHT!");
+      } else {
+  
+         //Cria o objeto dinamico "json" com tamanho "2" para a biblioteca
+         DynamicJsonDocument json(JSON_OBJECT_SIZE(2));
+          
+         //Atrela ao objeto "json" as leitura do sensor com os Aliases definidos
+         json[ALIAS1] = temperatura;
+         json[ALIAS2] = umidade;
+          
+         //Mede o tamanho da mensagem "json" e atrela o valor somado em uma unidade ao objeto "tamanho_mensagem"
+         size_t tamanho_mensagem = measureJson(json) + 1;
+          
+         //Cria a string "mensagem" de acordo com o tamanho do objeto "tamanho_mensagem"
+         char mensagem[tamanho_mensagem];
+         
+         //Copia o objeto "json" para a variavel "mensagem" e com o "tamanho_mensagem"
+         serializeJson(json, mensagem, tamanho_mensagem);
+          
+         //Publica a variavel "mensagem" no servidor utilizando a variavel "TOPICO"
+         Serial.println("");
+         Serial.print("Mensagem enviada: ");
+         Serial.println(mensagem);
+         MQTT.publish(TOPICO, mensagem);
+        
+      }
+      espera = millis() + INTERVALO; //Atualiza a contagem de tempo pela variavel "intervalo"
+    } 
+  }
+}
